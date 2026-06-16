@@ -10,13 +10,15 @@ answers it directly, with a deliberately hostile test set and high sample counts
 - Across **12 classic edge-case traps** (off-by-one, n=0, leap-century, subtractive Roman,
   deep nesting, …) on **two weak models** (`gpt-4.1-mini`, `gpt-5.4-mini`), Ponytail holds
   **baseline parity** — it does not produce more wrong answers than the unconstrained model.
-- The **one** measured soft spot: `gpt-5.4-mini` email validation, ~4–5% of the time it
-  reaches for `email.utils.parseaddr` (a parser, not a validator) and accepts
-  `"@missing-local.com"`. Every other task, both models, sits at parity.
-- That soft spot is **model-level, not skill-level**: a sharpened validation rule in
-  SKILL.md had **no reliable effect** in an n=100 A/B (96% → 95%, within noise), so it was
-  not shipped. Adding skill text that doesn't move the number is exactly the cargo-cult
-  Ponytail exists to avoid.
+- The **one** measured soft spot is email validation, and it is **provider-specific**:
+  OpenAI models, at every size, sometimes reach for `email.utils.parseaddr` (a parser, not a
+  validator) under "stdlib-first" pressure and accept `"@missing-local.com"`. On **Claude —
+  ponytail's target platform — email is 100%** (haiku/sonnet/opus, n=40 each), and ponytail
+  *beats* baseline there.
+- The slip is **not fixable by skill text**: 8 distinct SKILL.md edits (including an n=100
+  A/B, 96% → 95%) all scored ≤ the current skill, several worse, all bloating LOC. Counter-
+  instructions make small models overthink and fail *more*. Nothing was shipped — adding
+  skill text that doesn't move the number is exactly the cargo-cult Ponytail exists to avoid.
 
 ## Method
 
@@ -47,50 +49,76 @@ The only sub-20 cell in the first run was `gpt-5.4-mini` flatten at 19/20 — a 
 stochastic miss that **did not reproduce**: 50/50 at n=50. (`clamp` showed 19/19, i.e. one
 API error, not a wrong answer.)
 
-## Validators (the parse ≠ validate trap)
+## Validators: the email slip is provider-specific
 
-| task | model | baseline | ponytail |
-|---|---|--:|--:|
-| email | gpt-5.4-mini | 50/50 | 49/50 |
-| url | gpt-5.4-mini | — | 30/30 |
-| creditcard | gpt-5.4-mini | — | 30/30 |
-| ipv4 | gpt-5.4-mini | — | 29/30 |
+The one place ponytail measurably affects correctness is **email validation**, via the
+parse ≠ validate trap: under "stdlib-first" pressure a model reaches for
+`email.utils.parseaddr` — a *parser* that accepts malformed input like `@missing-local.com`
+— instead of writing an explicit check. The split is by **provider**, not model size.
 
-Email is the one real weakness. `url`/`creditcard`/`ipv4` hold because Ponytail's
-"stdlib first" instinct lands on *strict* helpers (`ipaddress`, scheme checks, Luhn) — only
-email's obvious stdlib choice (`parseaddr`) is a parser that accepts malformed input.
+**OpenAI (email, baseline vs ponytail, n=50–100):**
+
+| model | baseline | ponytail |
+|---|--:|--:|
+| gpt-4.1-mini | 100% | 98% |
+| gpt-4.1 | 100% | 79% |
+| gpt-5.4-mini | ~100% | ~92% |
+| gpt-5.4 | 100% | 98% |
+| gpt-5.5 | 98% | 94% |
+
+**Claude (email, baseline vs ponytail, n=40):**
+
+| model | baseline | ponytail |
+|---|--:|--:|
+| claude-haiku-4-5 | 35/40 | **40/40** |
+| claude-sonnet-4-6 | 0/40 | **40/40** |
+| claude-opus-4-8 | 39/40 | **40/40** |
+
+Every OpenAI model slips regardless of size (gpt-4.1 full is the worst). Every Claude model
+is **100%** — and ponytail *beats* baseline: unconstrained Sonnet over-engineers the
+validator into an always-truthy `{is_valid, message}` dict that accepts everything (0/40),
+while ponytail writes a clean correct one. `url`/`creditcard`/`ipv4` hold at ~100% under
+ponytail on both providers, because their lazy stdlib choice (`ipaddress`, Luhn, scheme
+checks) is already strict — only email's obvious stdlib tool is a parser.
 
 ## The fix that wasn't
 
 SKILL.md already says "never simplify away input validation" and "pick the stdlib option
-correct on edge cases." We tried sharpening it ("a validator that accepts malformed input is
-wrong — reject the bad, don't just parse the good"). It looked like it worked at n=20
-(18/20 → 20/20), but that was noise. The definitive n=100 A/B:
+correct on edge cases." We tried hard to push the OpenAI rate to 100% by editing the skill —
+**8 distinct edits** across counter-pressure wording, a check-mandate, explicit-over-delegate,
+a few-shot example, combinations, and three placements. Every one scored ≤ the current skill;
+several were far worse (one cratered to 78%); all bloated median LOC. The definitive n=100
+A/B of the most promising edit:
 
 ```
 OLD skill: 96/100 (96.0%)
 NEW skill: 95/100 (95.0%)   -> within noise, no reliable effect
 ```
 
-So the edit was reverted. The email tendency is a property of `gpt-5.4-mini`, not of the
-skill's wording, and re-emphasizing the rule doesn't change the model's reach for
-`parseaddr`. Held-out tasks (url/creditcard/ipv4) never exhibited the failure under either
-skill, so there was nothing for the principle to generalize to.
+Counter-instructions backfire: piling validation rules onto the skill makes models overthink
+and produce *more* broken validators, not fewer. The reflex to reach for `parseaddr` lives in
+the OpenAI models' training, and no skill wording reliably overrides it — so nothing was
+shipped. Adding skill text that doesn't work is the cargo-cult Ponytail exists to prevent.
 
 ## Conclusion
 
-"Ponytail degrades model performance" is not supported. On two weak models, across a battery
-built specifically to catch lazy edge-case failures, Ponytail matches the unconstrained
-baseline everywhere except a ~4–5% email-validator slip on `gpt-5.4-mini` — a model-level
-quirk that prompt changes don't fix. The LOC win (≈half the code, see the main benchmark)
-comes without a correctness tax on capable instruction-following models.
+"Ponytail degrades model performance" is not supported. Across 12 edge-case traps, ponytail
+holds baseline parity. On validation it is **100% on every Claude model — its target
+platform — where it also rescues baseline's over-engineering.** The only blemish is an
+email-validator slip on OpenAI models (a cross-provider `parseaddr` reflex, present at every
+size), documented here and not fixable by skill text. The LOC win (≈half the code) comes with
+no correctness tax on Claude.
 
 ## Reproduce
 
 ```bash
 cd benchmarks
 node robustness-audit.js --selftest        # verify all 16 instruments (no API)
-node robustness-audit.js                    # baseline vs ponytail, gpt-5.4-mini, n=20
+node robustness-audit.js                    # 16-task audit, gpt-5.4-mini, n=20
 AUDIT_MODEL=gpt-4.1-mini node robustness-audit.js
+
+# email cross-provider (the slip)
+ME_MODELS="gpt-4.1,gpt-5.4,gpt-5.5" ME_N=50 node model-email.js   # OpenAI  (OPENAI_API_KEY)
+node claude-email.js                                              # Claude  (ANTHROPIC_API_KEY)
 ```
-Needs `OPENAI_API_KEY` in `../.env`.
+`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` read from `../.env`.
